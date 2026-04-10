@@ -8,7 +8,6 @@ import logging
 import secrets
 
 from ._utils import create_jwt, decode_jwt
-from ._pgstore import AsyncPgDB
 
 from timetagger import __version__
 
@@ -184,6 +183,7 @@ async def authenticate(request):
         raise AuthException(str(err))
 
     # Open the database
+    from ._pgstore import AsyncPgDB
     db = AsyncPgDB(auth_info["username"])
     await db.open()
 
@@ -279,6 +279,7 @@ async def get_webtoken_unsafe(username, reset=False):
     use GET /api/v2/webtoken to get a fresh token once a day.
     """
     # Open db
+    from ._pgstore import AsyncPgDB
     db = AsyncPgDB(username)
     await db.open()
     try:
