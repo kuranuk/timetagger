@@ -6,16 +6,8 @@ from scripts import migrate
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 
-@pytest.fixture
-async def clean_db():
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    await conn.close()
-    yield
-
-
 @pytest.mark.asyncio
-async def test_migrate_creates_tables(clean_db):
+async def test_migrate_creates_tables():
     await migrate.run(DATABASE_URL)
 
     conn = await asyncpg.connect(DATABASE_URL)
@@ -33,6 +25,6 @@ async def test_migrate_creates_tables(clean_db):
 
 
 @pytest.mark.asyncio
-async def test_migrate_is_idempotent(clean_db):
+async def test_migrate_is_idempotent():
     await migrate.run(DATABASE_URL)
     await migrate.run(DATABASE_URL)  # should not raise
