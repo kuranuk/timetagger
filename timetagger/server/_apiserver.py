@@ -7,9 +7,8 @@ import time
 import logging
 import secrets
 
-import itemdb
-
-from ._utils import user2filename, create_jwt, decode_jwt
+from ._utils import create_jwt, decode_jwt
+from ._pgstore import AsyncPgDB
 
 from timetagger import __version__
 
@@ -184,12 +183,9 @@ async def authenticate(request):
     except Exception as err:
         raise AuthException(str(err))
 
-    # Open the database, this creates it if it does not yet exist
-    dbname = user2filename(auth_info["username"])
-    db = await itemdb.AsyncItemDB(dbname)
-    await db.ensure_table("userinfo", *INDICES["userinfo"])
-    await db.ensure_table("records", *INDICES["records"])
-    await db.ensure_table("settings", *INDICES["settings"])
+    # Open the database
+    db = AsyncPgDB(auth_info["username"])
+    await db.open()
 
     # Get reference seed from db
     expires = auth_info["expires"]
@@ -283,19 +279,21 @@ async def get_webtoken_unsafe(username, reset=False):
     use GET /api/v2/webtoken to get a fresh token once a day.
     """
     # Open db
-    dbname = user2filename(username)
-    db = await itemdb.AsyncItemDB(dbname)
-    await db.ensure_table("userinfo", *INDICES["userinfo"])
-    # Produce payload
-    seed = await _get_token_seed_from_db(db, "webtoken", reset)
-    payload = dict(
-        username=username,
-        expires=int(time.time()) + WEBTOKEN_LIFETIME,
-        seed=seed,
-    )
-    # Return token
-    token = create_jwt(payload)
-    return token
+    db = AsyncPgDB(username)
+    await db.open()
+    try:
+        # Produce payload
+        seed = await _get_token_seed_from_db(db, "webtoken", reset)
+        payload = dict(
+            username=username,
+            expires=int(time.time()) + WEBTOKEN_LIFETIME,
+            seed=seed,
+        )
+        # Return token
+        token = create_jwt(payload)
+        return token
+    finally:
+        await db.close()
 
 
 # %% The implementation
@@ -407,7 +405,7 @@ async def get_records(request, auth_info, db):
     query_parts.append(f"(t2 >= {tr1} AND t1 <= {tr2}) OR (t1 == t2 AND t1 <= {tr2})")
     for tag in tags:
         query_parts.append(
-            "json_extract(_ob, '$.ds') LIKE ? ESCAPE '\\' OR json_extract(_ob, '$.ds') LIKE ? ESCAPE '\\'"
+            "ds LIKE ? ESCAPE '\\' OR ds LIKE ? ESCAPE '\\'"
         )
         safe_params += [f"%#{tag} %", f"%#{tag}"]
     if running is True:
@@ -415,9 +413,9 @@ async def get_records(request, auth_info, db):
     if running is False:
         query_parts.append("t1 != t2")
     if hidden is True:
-        query_parts.append("json_extract(_ob, '$.ds') LIKE 'HIDDEN%'")
+        query_parts.append("ds LIKE 'HIDDEN%'")
     if hidden is False:
-        query_parts.append("json_extract(_ob, '$.ds') NOT LIKE 'HIDDEN%'")
+        query_parts.append("ds NOT LIKE 'HIDDEN%'")
     query = " AND ".join(f"({part})" for part in query_parts)
 
     # Collect records

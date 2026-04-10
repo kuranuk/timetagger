@@ -1,6 +1,6 @@
 uvicorn
 asgineer>=0.8.0
-itemdb>=1.1.1
+asyncpg>=0.29
 pscript>=0.7.6
 pyjwt
 jinja2

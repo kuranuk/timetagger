@@ -122,6 +122,51 @@ maintaining a server, backups, and all that. An account is just €3 per month.
 With that you'd also sponsor this project and open source in general.
 
 
+## Deploying to Vercel + Supabase
+
+TimeTagger can be deployed to Vercel as a Python Function backed by Supabase
+Postgres. See `docs/plans/2026-04-10-vercel-supabase-port-design.md` for the
+full design.
+
+Quick start:
+
+1. Install the Supabase integration from the Vercel Marketplace
+   (auto-provisions `POSTGRES_URL`, `POSTGRES_URL_NON_POOLING`, and
+   `SUPABASE_*` variables):
+
+   ```
+   vercel integration add supabase
+   ```
+
+2. Set the TimeTagger-specific env vars:
+
+   ```
+   vercel env add TIMETAGGER_CREDENTIALS    # user1:bcrypt-hash,user2:bcrypt-hash
+   vercel env add TIMETAGGER_JWT_SECRET     # 32 random bytes
+   vercel env add TIMETAGGER_PATH_PREFIX    # /
+   ```
+
+3. Apply the schema once. Either use the Supabase CLI:
+
+   ```
+   supabase link --project-ref <your-project-ref>
+   supabase db push
+   ```
+
+   or the bundled Python runner (reads `supabase/migrations/`):
+
+   ```
+   vercel env pull .env.local --yes
+   env $(grep POSTGRES_URL_NON_POOLING .env.local) python scripts/migrate.py
+   ```
+
+4. Deploy:
+
+   ```
+   vercel deploy --prod
+   ```
+
+
 ## Copyright and license
 
 As usual, copyright applies to whomever made a particular contribution in this repository,

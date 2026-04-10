@@ -78,3 +78,37 @@ jobs:
         run: |
             python -c "import sys; print(sys.version, '\n', sys.prefix)";
             pytest -v .
+
+  test-postgres:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: timetagger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/timetagger_test
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+      - name: Run Postgres tests
+        run: |
+          pytest tests/test_migrate.py tests/test_pgstore.py tests/test_api_integration.py tests/test_build_assets.py -v
