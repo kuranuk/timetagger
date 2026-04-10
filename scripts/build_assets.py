@@ -4,6 +4,10 @@ import sys
 from importlib import resources
 from pathlib import Path
 
+# Ensure the repo root is on sys.path so `timetagger` is importable even when
+# the package is not pip-installed (e.g., in Vercel's build environment).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 os.environ.setdefault("TIMETAGGER_PATH_PREFIX", "/")
 
 from timetagger.server import create_assets_from_dir, enable_service_worker  # noqa: E402
