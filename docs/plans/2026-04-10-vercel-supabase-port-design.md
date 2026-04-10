@@ -1,14 +1,14 @@
-# TimeTagger on Vercel + Neon — Design Doc
+# TimeTagger on Vercel + Supabase — Design Doc
 
 - Date: 2026-04-10
 - Status: Approved (pending implementation plan)
-- Target: self-hosted deployment on Vercel with Neon Postgres; single user primary,
+- Target: self-hosted deployment on Vercel with Supabase Postgres; single user primary,
   future 2–N users without code changes.
 
 ## 1. Goals
 
 - Run the existing TimeTagger server on Vercel Functions (Fluid Compute, Python).
-- Replace per-user SQLite (via `itemdb`) with a single Neon Postgres database.
+- Replace per-user SQLite (via `itemdb`) with a single Supabase Postgres database.
 - Keep the existing client (PScript → JS), API surface, and bcrypt credential
   auth untouched from the user's point of view.
 - Minimize the diff in `timetagger/server/_apiserver.py`.
@@ -18,29 +18,39 @@
 
 ### Non-goals (YAGNI)
 
-- Supabase Auth / Clerk / third-party IdP integration.
-- Neon branching per preview deployment.
+- Supabase Auth / Realtime / Storage / Edge Functions usage — we only use the
+  Postgres database. TimeTagger keeps its own bcrypt + JWT auth.
+- Supabase branching per preview deployment.
 - Vercel Cron backups, Rolling Releases, Sign in with Vercel.
 - PScript-to-Wasm rewrite.
 - Content-hashed asset filenames (version suffix is good enough for now).
 
-## 2. Why Neon over Supabase
+## 2. Why Supabase
 
-TimeTagger's data layer is effectively a key-value store over JSON items with a
-few numeric indexes (`_apiserver.py:61-72`). `itemdb` is a thin wrapper over
-SQLite. Plain Postgres is a direct match.
+User preference (reversal from the initial Neon recommendation). Supabase is a
+fine fit for TimeTagger because:
 
-Supabase bundles Auth, Realtime, Storage, Edge Functions. TimeTagger already has
-its own bcrypt + JWT auth, and its client polls `/updates?since=...` rather than
-using realtime push (`_apiserver.py:309`), so Supabase's differentiators add
-only operational surface area without benefit.
+- It is a Vercel Marketplace-native integration
+  (`vercel integration add supabase`) and auto-provisions `POSTGRES_URL`,
+  `POSTGRES_URL_NON_POOLING`, `SUPABASE_URL`, service-role keys, etc., into the
+  linked project environment.
+- The database itself is standard Postgres 15+, so the same `asyncpg`-based
+  storage adapter design works identically.
+- The Supavisor pooled endpoint on port 6543 provides PgBouncer transaction-mode
+  pooling, matching what Fluid Compute wants.
+- The `supabase` CLI provides a conventional migration workflow
+  (`supabase db push`) that reads from `supabase/migrations/` — cleaner for
+  future schema changes than a hand-rolled runner.
 
-Neon gives:
+We deliberately do **not** use Supabase's non-Postgres features (Auth,
+Realtime, Storage, Edge Functions). TimeTagger already has bcrypt credential
+auth and a polling client, so those products would add operational surface
+area without benefit. Only the service-role Postgres connection is used.
 
-- Pure serverless Postgres with scale-to-zero and Vercel Marketplace native
-  integration (auto-provisioned `DATABASE_URL`).
-- Pooled endpoint (PgBouncer transaction-mode) suitable for Fluid Compute.
-- Free tier that covers individual / few-user deployments comfortably.
+Security note: because Supabase also exposes anon / authenticated API keys
+publicly, we enable Row Level Security on every TimeTagger table with **no
+policies**, so only the service-role connection used by the Python Function can
+read or write the data, even if an anon key ever leaks.
 
 ## 3. Access control
 
@@ -168,18 +178,25 @@ async def get_pool() -> asyncpg.Pool:
 
 Key settings:
 
-- `min_size=0`: do not hold idle connections; lets Neon autosuspend.
+- `min_size=0`: do not hold idle connections; friendly to Supabase's free tier
+  connection caps and to Vercel Fluid Compute instance scaling.
 - `max_size=4`: sized for per-instance concurrency on Fluid Compute, conservative
-  for Neon connection limits.
-- `statement_cache_size=0`: required when connecting through Neon's pooled
-  endpoint (`-pooler` suffix), which uses PgBouncer in transaction mode and does
-  not preserve prepared statements across transactions.
+  against Supabase's per-project connection limits.
+- `statement_cache_size=0`: required when connecting through Supabase's pooled
+  endpoint (Supavisor, port 6543, transaction mode). Prepared statements do not
+  persist across transactions there.
 
-DSN resolution order:
+DSN resolution order (matches Supabase's Vercel Marketplace integration env
+vars):
 
-1. `TIMETAGGER_DATABASE_URL` (explicit)
-2. `DATABASE_URL` (Vercel Marketplace / Neon integration default)
-3. `POSTGRES_URL`
+1. `TIMETAGGER_DATABASE_URL` (explicit override)
+2. `POSTGRES_URL` (Supabase pooled / Supavisor transaction mode, port 6543) ⭐
+3. `POSTGRES_PRISMA_URL` (same pooled endpoint, with `?pgbouncer=true`)
+4. `POSTGRES_URL_NON_POOLING` (direct, port 5432 — only for `scripts/migrate.py`
+   where we want full DDL support and session features)
+
+The Python Function always uses the pooled URL; the migration runner prefers
+the non-pooling URL.
 
 ## 7. Vercel Function entry
 
@@ -282,14 +299,23 @@ Notes:
 
 ## 9. Migrations
 
-Lightweight hand-rolled runner, not Alembic.
+Use Supabase's standard `supabase/migrations/` directory convention so the
+`supabase` CLI works out of the box, but keep a small Python runner as a
+zero-dependency fallback for CI and ad-hoc remote runs.
 
-- `migrations/0001_init.sql` contains the CREATE TABLE statements from §4.
-- `scripts/migrate.py` reads `migrations/*.sql` in lexicographic order, applies
-  any not recorded in a `schema_migrations (version TEXT PRIMARY KEY, applied_at
-  TIMESTAMPTZ)` table, and records each on success.
-- Run manually after schema changes with `DATABASE_URL=... python
-  scripts/migrate.py`. Not triggered by `vercel build`.
+- `supabase/migrations/20260410000001_init.sql` contains the CREATE TABLE
+  statements from §4, plus `alter table ... enable row level security` on every
+  table (no policies — defense in depth against accidental anon key exposure).
+- Primary path: `supabase db push` (requires the `supabase` CLI and a linked
+  project).
+- Fallback path: `python scripts/migrate.py` reads `supabase/migrations/*.sql`
+  in lexicographic order (Supabase CLI uses `YYYYMMDDHHMMSS_` prefixes, which
+  sort correctly), applies any not recorded in a `schema_migrations (version
+  TEXT PRIMARY KEY, applied_at TIMESTAMPTZ)` table, and records each on
+  success. Runs against `POSTGRES_URL_NON_POOLING` so DDL and advisory locks
+  behave normally.
+- Neither path is triggered by `vercel build` — migrations are an operator
+  action.
 
 ## 10. Patches to existing files
 
@@ -332,21 +358,28 @@ Leave in place but unused. No breakage for external importers.
 
 ## 11. Environment variables
 
-| Variable | Purpose | Example |
+| Variable | Purpose | Source |
 |---|---|---|
-| `TIMETAGGER_DATABASE_URL` (or `DATABASE_URL`) | Neon pooled endpoint | `postgres://user:pass@ep-xxx-pooler.neon.tech/neondb?sslmode=require` |
-| `TIMETAGGER_CREDENTIALS` | bcrypt hashes, comma-separated | `alice:$2a$08$...,bob:$2a$08$...` |
-| `TIMETAGGER_JWT_SECRET` | HS256 signing key | 32 random bytes (base64) |
-| `TIMETAGGER_PATH_PREFIX` | Must be `/` on Vercel | `/` |
+| `POSTGRES_URL` | Supabase pooled endpoint (Supavisor, txn mode, port 6543) | Auto-provisioned by Supabase Marketplace integration |
+| `POSTGRES_URL_NON_POOLING` | Direct Postgres (port 5432) — used only by `scripts/migrate.py` | Auto-provisioned |
+| `TIMETAGGER_DATABASE_URL` | Optional explicit override | Manual (`vercel env add`) |
+| `TIMETAGGER_CREDENTIALS` | bcrypt hashes, comma-separated | Manual |
+| `TIMETAGGER_JWT_SECRET` | HS256 signing key (32 random bytes) | Manual |
+| `TIMETAGGER_PATH_PREFIX` | Must be `/` on Vercel | Manual |
 
-Provision via Neon's Vercel Marketplace integration for `DATABASE_URL`; set the
-others with `vercel env add`.
+Provision via `vercel integration add supabase`; that injects the `POSTGRES_*`
+and `SUPABASE_*` variables into the linked Vercel project. Set the
+`TIMETAGGER_*` ones with `vercel env add`.
+
+The `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` env
+vars are injected by the integration but **not used** by TimeTagger — we
+talk to Postgres directly via `POSTGRES_URL`.
 
 ## 12. Testing
 
 1. **Unit tests for `_pgstore.py`** — CRUD, transactions, `mtime` tracking,
-   two-user isolation. Run against a local Postgres or GitHub Actions
-   `services: postgres:16`.
+   two-user isolation. Run against a local Postgres 15 (matching Supabase) or
+   GitHub Actions `services: postgres:15`.
 2. **API integration tests** — run the existing `tests/` suite against
    `_pgstore.AsyncPgDB`. A `conftest.py` fixture reads `DATABASE_URL` from env
    and resets the schema between tests via `DROP SCHEMA public CASCADE; CREATE
@@ -356,27 +389,37 @@ others with `vercel env add`.
 4. **Delete the old SQLite-based test fixtures**. Do not maintain two
    backends.
 
-CI: add `postgres:16` as a service in the GitHub Actions workflow, export
-`DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres`.
+CI: add `postgres:15` as a service in the GitHub Actions workflow, export
+`DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres`. Local
+Supabase (`supabase start`) can be used for manual testing but is not required
+in CI.
 
 ## 13. Deployment checklist
 
-1. Provision Neon via Vercel Marketplace → `DATABASE_URL` auto-injected.
+1. Install the Supabase Marketplace integration:
+   `vercel integration add supabase` → auto-injects `POSTGRES_URL`,
+   `POSTGRES_URL_NON_POOLING`, `SUPABASE_URL`, and related env vars.
 2. `vercel env add TIMETAGGER_CREDENTIALS` (bcrypt hashes).
 3. `vercel env add TIMETAGGER_JWT_SECRET` (random 32 bytes).
 4. `vercel env add TIMETAGGER_PATH_PREFIX /`.
-5. Locally: `DATABASE_URL=... python scripts/migrate.py` to create tables.
+5. Apply the schema once:
+   - Preferred: `supabase link --project-ref <ref>` then `supabase db push`
+   - Fallback: `vercel env pull .env.local --yes`, then
+     `env $(grep POSTGRES_URL_NON_POOLING .env.local) python scripts/migrate.py`
 6. `vercel deploy --prod`.
 7. Visit `/login`, sign in with a configured username/password.
 
 ## 14. Open questions / risks
 
-- **asyncpg + Neon pooled endpoint edge cases**: if we hit prepared-statement
-  issues beyond `statement_cache_size=0`, fall back to the direct endpoint and
-  accept colder starts.
+- **asyncpg + Supavisor transaction-mode edge cases**: if we hit prepared-
+  statement issues beyond `statement_cache_size=0`, fall back to
+  `POSTGRES_URL_NON_POOLING` and accept more connection pressure.
 - **PScript compile time in the build container**: if it exceeds a reasonable
   budget, switch to caching the compiled output in a `build-cache/` directory
   committed to the repo.
 - **Build container Python version**: Vercel defaults to Python 3.13; verify
-  `pscript`, `asgineer`, `itemdb` (removed), `bcrypt`, `pyjwt` all install
-  cleanly. If not, pin Python version in `vercel.ts`.
+  `pscript`, `asgineer`, `asyncpg`, `bcrypt`, `pyjwt` all install cleanly. If
+  not, pin the runtime version in `vercel.ts`.
+- **Supabase free tier auto-pause**: free projects pause after 7 days of
+  inactivity. For a personal TimeTagger deploy this is fine (a Vercel Cron
+  ping every few days would keep it warm, but that is out of scope).
