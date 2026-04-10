@@ -3,6 +3,13 @@
 Static assets live in /public and are served by Vercel Edge Network; vercel.ts
 rewrites /api/v2/* to this function.
 """
+import sys
+from pathlib import Path
+
+# Ensure the repo root is on sys.path so `timetagger` is importable even when
+# the package is not pip-installed (Vercel only installs requirements.txt deps).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import asgineer
 
 from timetagger.server import authenticate, AuthException, api_handler_triage
