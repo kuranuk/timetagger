@@ -1,0 +1,21 @@
+{
+  "buildCommand": "python scripts/build_assets.py",
+  "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/api/v2/(.*)", "destination": "/api/index" }
+  ],
+  "headers": [
+    {
+      "source": "/app/sw.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0" }
+      ]
+    },
+    {
+      "source": "/app/(.*)\\.(?:js|css|woff2|png|svg)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    }
+  ]
+}

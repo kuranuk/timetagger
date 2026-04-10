@@ -1,7 +1,0 @@
-{
-  "name": "timetagger-vercel",
-  "private": true,
-  "devDependencies": {
-    "@vercel/config": "^1.0.0"
-  }
-}
