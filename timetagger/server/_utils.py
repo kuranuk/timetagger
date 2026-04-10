@@ -53,11 +53,11 @@ def filename2user(filename):
 
 
 def _load_jwt_key():
-    """Load the secret JWT key from file. If it does not exist, we
-    simply create a new one. This means that by removing this key file
-    and restarting the server, all issued tokens before that time will
-    become invalid.
-    """
+    """Load the JWT signing key. Prefers env var (for Vercel/stateless),
+    falls back to file (for local dev)."""
+    secret = os.environ.get("TIMETAGGER_JWT_SECRET", "").strip()
+    if secret:
+        return secret
     filename = os.path.join(ROOT_TT_DIR, "jwt.key")
     secret = ""
     if os.path.isfile(filename):
