@@ -42,9 +42,21 @@ class AsyncPgDB:
         self._tx = None
         self._mtime: Optional[float] = None
 
+    @property
+    def mtime(self) -> float:
+        return self._mtime if self._mtime is not None else 0.0
+
+    async def _load_mtime(self) -> None:
+        assert self._conn is not None
+        row = await self._conn.fetchrow(
+            "SELECT mtime FROM db_meta WHERE username = $1", self._username
+        )
+        self._mtime = float(row["mtime"]) if row else 0.0
+
     async def open(self) -> None:
         pool = await get_pool()
         self._conn = await pool.acquire()
+        await self._load_mtime()
 
     async def close(self) -> None:
         if self._conn is not None:
